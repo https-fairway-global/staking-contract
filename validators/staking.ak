@@ -1,11 +1,10 @@
+use aiken/collection/list.{foldl}
 // use aiken/bytearray
 use aiken/crypto.{VerificationKeyHash}
-use aiken/collection/list.{foldl}
-use cardano/transaction.{Input, Output, Transaction, OutputReference}
 use cardano/address.{Address, VerificationKey}
-use cardano/script_context.{ScriptContext, ScriptInfo, Spending}
 use cardano/assets.{PolicyId, quantity_of}
-
+use cardano/script_context.{ScriptContext, ScriptInfo, Spending}
+use cardano/transaction.{Input, Output, OutputReference, Transaction}
 // Import constants from environment config
 use env.{min_curator_stake, min_issuer_stake}
 
@@ -60,12 +59,21 @@ pub type StakeAction {
 
 // --- Action Handlers --- 
 
-fn handle_stake(fairway_token_policy: PolicyId, did_token_policy: PolicyId, datum: StakeDatum, context: ScriptContext) -> Bool {
+fn handle_stake(
+  fairway_token_policy: PolicyId,
+  did_token_policy: PolicyId,
+  datum: StakeDatum,
+  context: ScriptContext,
+) -> Bool {
   // Check staker signature (matches datum.staker)
   let check_sig = list.has(context.transaction.extra_signatories, datum.staker)
 
   // Check DID token reference input (policy DID_TOKEN_POLICY, count == 1)
-  let check_did_ref = check_did_token_reference(did_token_policy, context.transaction.reference_inputs)
+  let check_did_ref =
+    check_did_token_reference(
+      did_token_policy,
+      context.transaction.reference_inputs,
+    )
 
   // Check output to script contains datum.staked_amount of FAIRWAY_TOKEN
   let check_output = check_stake_output(fairway_token_policy, context, datum)
@@ -76,29 +84,51 @@ fn handle_stake(fairway_token_policy: PolicyId, did_token_policy: PolicyId, datu
   check_sig && check_did_ref && check_output && check_min_stake
 }
 
-fn handle_withdraw(fairway_token_policy: PolicyId, datum: StakeDatum, context: ScriptContext) -> Bool {
+fn handle_withdraw(
+  fairway_token_policy: PolicyId,
+  datum: StakeDatum,
+  context: ScriptContext,
+) -> Bool {
   // Check staker signature (matches datum.staker)
   let check_sig = list.has(context.transaction.extra_signatories, datum.staker)
 
   // Check consumed input has datum.staked_amount of FAIRWAY_TOKEN
-  let check_input = check_input_contains_stake(fairway_token_policy, context, datum)
+  let check_input =
+    check_input_contains_stake(fairway_token_policy, context, datum)
 
   // Check transaction returns datum.staked_amount of FAIRWAY_TOKEN to datum.staker
-  let check_return = check_stake_returned_to_staker(fairway_token_policy, context.transaction, datum)
+  let check_return =
+    check_stake_returned_to_staker(
+      fairway_token_policy,
+      context.transaction,
+      datum,
+    )
 
   // TODO: Optional: Check time lock
   check_sig && check_input && check_return
 }
 
-fn handle_slash(fairway_token_policy: PolicyId, slashing_authority: ByteArray, datum: StakeDatum, context: ScriptContext) -> Bool {
+fn handle_slash(
+  fairway_token_policy: PolicyId,
+  slashing_authority: ByteArray,
+  datum: StakeDatum,
+  context: ScriptContext,
+) -> Bool {
   // Check slashing authority signature (SLASHING_AUTHORITY_KEY_HASH)
-  let check_auth_sig = list.has(context.transaction.extra_signatories, slashing_authority)
+  let check_auth_sig =
+    list.has(context.transaction.extra_signatories, slashing_authority)
 
   // Check consumed input has datum.staked_amount of FAIRWAY_TOKEN
-  let check_input = check_input_contains_stake(fairway_token_policy, context, datum)
+  let check_input =
+    check_input_contains_stake(fairway_token_policy, context, datum)
 
   // Check transaction does NOT return FAIRWAY_TOKEN to datum.staker
-  let check_no_return = check_stake_not_returned_to_staker(fairway_token_policy, context.transaction, datum)
+  let check_no_return =
+    check_stake_not_returned_to_staker(
+      fairway_token_policy,
+      context.transaction,
+      datum,
+    )
 
   check_auth_sig && check_input && check_no_return
 }
@@ -108,88 +138,104 @@ fn handle_slash(fairway_token_policy: PolicyId, slashing_authority: ByteArray, d
 /// Get the UTXO input being spent by this script invocation
 fn find_own_input(tx: Transaction, info: ScriptInfo) -> Option<Input> {
   when info is {
-    Spending { output: ref, .. } -> list.find(tx.inputs, fn(input) { input.output_reference == ref })
+    Spending { output: ref, .. } ->
+      list.find(tx.inputs, fn(input) { input.output_reference == ref })
     _ -> None
   }
 }
 
 /// Check that the input being spent contains the correct staked amount
-fn check_input_contains_stake(fairway_token_policy: PolicyId, context: ScriptContext, datum: StakeDatum) -> Bool {
-  when find_own_input(context.transaction, context.info) is { // Use when pattern match
-    Some(input) -> { // Case for Some(input)
-      quantity_of(
-        input.output.value,
-        fairway_token_policy,
-        #"", // Empty AssetName
-      )
-        == datum.staked_amount
-    }
-    None -> False // Case for None
+fn check_input_contains_stake(
+  fairway_token_policy: PolicyId,
+  context: ScriptContext,
+  datum: StakeDatum,
+) -> Bool {
+  when find_own_input(context.transaction, context.info) is {
+    // Use when pattern match
+    Some(input) ->
+      // Case for Some(input)
+      quantity_of(input.output.value, fairway_token_policy, #"") == // Empty AssetName
+      datum.staked_amount
+    None -> False
   }
+  // Case for None
 }
 
 /// Check that the transaction sends the staked amount back to the staker
-fn check_stake_returned_to_staker(fairway_token_policy: PolicyId, tx: Transaction, datum: StakeDatum) -> Bool {
-  let total_sent = 
+fn check_stake_returned_to_staker(
+  fairway_token_policy: PolicyId,
+  tx: Transaction,
+  datum: StakeDatum,
+) -> Bool {
+  let total_sent =
     foldl(
       tx.outputs,
       0,
       fn(output, acc) {
-        if (output.address == Address(VerificationKey(datum.staker), None)) {
+        if output.address == Address(VerificationKey(datum.staker), None) {
           acc + quantity_of(output.value, fairway_token_policy, #"")
         } else {
           acc
         }
-      }
+      },
     )
   total_sent >= datum.staked_amount
 }
 
 /// Check that the transaction does NOT send the staked amount back to the staker
-fn check_stake_not_returned_to_staker(fairway_token_policy: PolicyId, tx: Transaction, datum: StakeDatum) -> Bool {
-  let total_sent = 
+fn check_stake_not_returned_to_staker(
+  fairway_token_policy: PolicyId,
+  tx: Transaction,
+  datum: StakeDatum,
+) -> Bool {
+  let total_sent =
     foldl(
       tx.outputs,
       0,
       fn(output, acc) {
-        if (output.address == Address(VerificationKey(datum.staker), None)) {
+        if output.address == Address(VerificationKey(datum.staker), None) {
           acc + quantity_of(output.value, fairway_token_policy, #"")
         } else {
           acc
         }
-      }
+      },
     )
   total_sent == 0
 }
 
 /// Check that exactly one DID token from the specified policy exists in reference inputs
-fn check_did_token_reference(did_token_policy: PolicyId, reference_inputs: List<Input>) -> Bool {
-  let count = list.foldl(
-    reference_inputs,
-    0,
-    fn(input, acc) {
-      acc
-        + quantity_of(
-            input.output.value,
-            did_token_policy,
-            #"", // Empty AssetName
-          )
-    },
-  )
+fn check_did_token_reference(
+  did_token_policy: PolicyId,
+  reference_inputs: List<Input>,
+) -> Bool {
+  let count =
+    list.foldl(
+      reference_inputs,
+      0,
+      fn(input, acc) {
+        acc + quantity_of(input.output.value, did_token_policy, #"")
+      },
+    )
+  // Empty AssetName
   count == 1
 }
 
 /// Check that the transaction creates an output to the script
 /// containing the correct staked amount of the Fairway token.
-fn check_stake_output(fairway_token_policy: PolicyId, context: ScriptContext, datum: StakeDatum) -> Bool {
+fn check_stake_output(
+  fairway_token_policy: PolicyId,
+  context: ScriptContext,
+  datum: StakeDatum,
+) -> Bool {
   // Get the script's own address from the context
-  let own_address = 
+  let own_address =
     when context.info is {
-      Spending { .. } -> { // Use named field (even if empty)
+      Spending { .. } -> {
+        // Use named field (even if empty)
         expect Some(input) = find_own_input(context.transaction, context.info)
-        input.output.address 
+        input.output.address
       }
-      _ -> fail @"Script must be used for Spending purpose" 
+      _ -> fail @"Script must be used for Spending purpose"
     }
 
   // Check if *any* output goes back to the script address with the correct amount
@@ -200,8 +246,9 @@ fn check_stake_output(fairway_token_policy: PolicyId, context: ScriptContext, da
       output.address == own_address && quantity_of(
         output.value,
         fairway_token_policy,
-        #"", // Empty AssetName
-      ) == datum.staked_amount
+        #"",
+      ) == // Empty AssetName
+      datum.staked_amount
     },
   )
 }
@@ -219,18 +266,31 @@ validator staking_contract(
   did_token_policy: PolicyId,
   slashing_authority: ByteArray,
 ) {
-  spend(datum_opt: Option<StakeDatum>, redeemer: StakeAction, _target: OutputReference, context: ScriptContext) {
+  spend(
+    datum_opt: Option<StakeDatum>,
+    redeemer: StakeAction,
+    _target: OutputReference,
+    context: ScriptContext,
+  ) {
     expect Some(datum) = datum_opt
 
     when redeemer is {
-      Stake -> handle_stake(fairway_token_policy, did_token_policy, datum, context)
+      Stake ->
+        handle_stake(fairway_token_policy, did_token_policy, datum, context)
       Withdraw -> handle_withdraw(fairway_token_policy, datum, context)
-      Slash -> handle_slash(fairway_token_policy, slashing_authority, datum, context)
+      Slash ->
+        handle_slash(fairway_token_policy, slashing_authority, datum, context)
     }
   }
+
+  else(_) {
+    fail
+  }
+
   // --- Moved Action Handlers --- 
   // --- Moved Helper Functions --- 
-} // Closing brace for validator block
+}
+// Closing brace for validator block
 
 // --- Action Handlers (commented out) ---
 // 
