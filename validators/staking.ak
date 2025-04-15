@@ -8,95 +8,82 @@ use cardano/transaction.{Input, Output, OutputReference, Transaction}
 // Import constants from environment config
 use env.{min_curator_stake, min_issuer_stake}
 
-// Define constants directly in this file for debugging
-// pub const FAIRWAY_TOKEN_POLICY: ByteArray = #"00000000000000000000000000000000000000000000000000000000"
-// pub const DID_TOKEN_POLICY: ByteArray = #"00000000000000000000000000000000000000000000000000000000"
-// // This should be the Blake2b-224 hash of the verification key
-// pub const SLASHING_AUTHORITY_KEY_HASH: ByteArray = #"00000000000000000000000000000000000000000000000000000000"
-// pub const MIN_CURATOR_STAKE: Int = 0
-// pub const MIN_ISSUER_STAKE: Int = 0
-
-// Import constants explicitly from the library module
-// use fairway/staking/lib/config.{FAIRWAY_TOKEN_POLICY, DID_TOKEN_POLICY, SLASHING_AUTHORITY_KEY_HASH, MIN_CURATOR_STAKE, MIN_ISSUER_STAKE}
-
-// Minimal type definitions for debugging
-// pub opaque type StakeDatum { DummyDatum } 
-// pub opaque type StakeAction { DummyAction }
-// pub type ScriptContext { DummyContext }
-
-/// Enum defining the role of the staker
+/// Enum defining the role of the staker (e.g., Curator, Issuer).
+/// Determines minimum staking requirements.
 pub type StakeRole {
   Curator
   Issuer
 }
 
-/// Datum stored with each stake UTXO
+/// Datum stored with each stake UTxO.
+/// Contains information about the staker, their role, the amount staked,
+/// and an associated identifier hash (e.g., related to a DID).
 pub type StakeDatum {
+  /// Verification key hash of the wallet staking the tokens.
   staker: VerificationKeyHash,
+  /// An identifier associated with the stake, potentially a hash related to a DID.
   issuer_did_hash: ByteArray,
+  /// The role of the staker (Curator or Issuer).
   role: StakeRole,
+  /// The amount of FAIRWAY tokens staked.
   staked_amount: Int,
 }
 
-/// Redeemer defining the action being performed
+/// Redeemer defining the action being performed on the stake.
 pub type StakeAction {
+  /// Action for initially validating the stake conditions (though locking happens prior).
   Stake
+  /// Action for the staker to reclaim their staked tokens.
   Withdraw
+  /// Action for the designated authority to slash the staked tokens.
   Slash
 }
 
-// Minimal validator for debugging
-// validator spend(datum: StakeDatum, redeemer: StakeAction, context: ScriptContext) {
-//   // Access the imported constant to ensure import works
-//   let _unused = TEST_VALUE
-//   True 
-//   // when redeemer is {
-//   //   Stake -> handle_stake(datum, context)
-//   //   Withdraw -> handle_withdraw(datum, context)
-//   //   Slash -> handle_slash(datum, context)
-//   // }
-// }
-
 // --- Action Handlers --- 
 
+/// Validates the conditions required for the staking action.
+/// Note: The actual locking of funds and datum creation occurs in the transaction
+/// that creates the UTxO being spent here.
 fn handle_stake(
   fairway_token_policy: PolicyId,
   did_token_policy: PolicyId,
   datum: StakeDatum,
   context: ScriptContext,
 ) -> Bool {
-  // Check staker signature (matches datum.staker)
+  // 1. Must be signed by the staker defined in the datum.
   let check_sig = list.has(context.transaction.extra_signatories, datum.staker)
 
-  // Check DID token reference input (policy DID_TOKEN_POLICY, count == 1)
+  // 2. Must have exactly one token of the specified DID policy in reference inputs.
   let check_did_ref =
     check_did_token_reference(
       did_token_policy,
       context.transaction.reference_inputs,
     )
 
-  // Check output to script contains datum.staked_amount of FAIRWAY_TOKEN
+  // 3. Must have a continuing output to the script address containing the correct datum and staked amount.
   let check_output = check_stake_output(fairway_token_policy, context, datum)
 
-  // Check stake amount meets minimums based on datum.role
+  // 4. The staked amount must meet the minimum defined for the staker's role.
   let check_min_stake = check_minimum_stake(datum)
 
+  // All conditions must pass.
   check_sig && check_did_ref && check_output && check_min_stake
 }
 
+/// Validates the conditions for the staker to withdraw their stake.
 fn handle_withdraw(
   fairway_token_policy: PolicyId,
   datum: StakeDatum,
   context: ScriptContext,
 ) -> Bool {
-  // Check staker signature (matches datum.staker)
+  // 1. Must be signed by the staker defined in the datum.
   let check_sig = list.has(context.transaction.extra_signatories, datum.staker)
 
-  // Check consumed input has datum.staked_amount of FAIRWAY_TOKEN
+  // 2. The input being spent must contain the originally staked amount.
   let check_input =
     check_input_contains_stake(fairway_token_policy, context, datum)
 
-  // Check transaction returns datum.staked_amount of FAIRWAY_TOKEN to datum.staker
+  // 3. The transaction must return the full staked amount to the staker's address.
   let check_return =
     check_stake_returned_to_staker(
       fairway_token_policy,
@@ -104,25 +91,27 @@ fn handle_withdraw(
       datum,
     )
 
-  // TODO: Optional: Check time lock
+  // TODO: Optional: Check time lock (e.g., require withdrawal only after a certain period)
+  // All conditions must pass.
   check_sig && check_input && check_return
 }
 
+/// Validates the conditions for the slashing authority to slash the stake.
 fn handle_slash(
   fairway_token_policy: PolicyId,
-  slashing_authority: ByteArray,
+  slashing_authority: ByteArray, // Passed as parameter
   datum: StakeDatum,
   context: ScriptContext,
 ) -> Bool {
-  // Check slashing authority signature (SLASHING_AUTHORITY_KEY_HASH)
+  // 1. Must be signed by the designated slashing authority.
   let check_auth_sig =
     list.has(context.transaction.extra_signatories, slashing_authority)
 
-  // Check consumed input has datum.staked_amount of FAIRWAY_TOKEN
+  // 2. The input being spent must contain the originally staked amount.
   let check_input =
     check_input_contains_stake(fairway_token_policy, context, datum)
 
-  // Check transaction does NOT return FAIRWAY_TOKEN to datum.staker
+  // 3. The transaction must *not* return the staked amount to the original staker.
   let check_no_return =
     check_stake_not_returned_to_staker(
       fairway_token_policy,
@@ -130,6 +119,7 @@ fn handle_slash(
       datum,
     )
 
+  // All conditions must pass.
   check_auth_sig && check_input && check_no_return
 }
 
@@ -161,7 +151,7 @@ fn check_input_contains_stake(
   // Case for None
 }
 
-/// Check that the transaction sends the staked amount back to the staker
+/// Check that the transaction sends the staked amount back to the staker's address
 fn check_stake_returned_to_staker(
   fairway_token_policy: PolicyId,
   tx: Transaction,
@@ -182,7 +172,7 @@ fn check_stake_returned_to_staker(
   total_sent >= datum.staked_amount
 }
 
-/// Check that the transaction does NOT send the staked amount back to the staker
+/// Check that the transaction does NOT send the staked amount back to the staker's address
 fn check_stake_not_returned_to_staker(
   fairway_token_policy: PolicyId,
   tx: Transaction,
@@ -203,7 +193,8 @@ fn check_stake_not_returned_to_staker(
   total_sent == 0
 }
 
-/// Check that exactly one DID token from the specified policy exists in reference inputs
+/// Check that exactly one DID token (matching the specified policy ID) 
+/// exists across all reference inputs in the transaction.
 fn check_did_token_reference(
   did_token_policy: PolicyId,
   reference_inputs: List<Input>,
@@ -220,8 +211,9 @@ fn check_did_token_reference(
   count == 1
 }
 
-/// Check that the transaction creates an output to the script
-/// containing the correct staked amount of the Fairway token.
+/// Check that the transaction creates exactly one output back to the script address
+/// containing the correct staked amount of the Fairway token and the correct datum.
+/// (Assumes datum check happens implicitly via UTxO comparison or off-chain).
 fn check_stake_output(
   fairway_token_policy: PolicyId,
   context: ScriptContext,
@@ -253,7 +245,8 @@ fn check_stake_output(
   )
 }
 
-/// Check if the staked amount meets the minimum requirement for the role
+/// Check if the staked amount in the datum meets the minimum requirement 
+/// defined in the environment config for the staker's role.
 fn check_minimum_stake(datum: StakeDatum) -> Bool {
   when datum.role is {
     Curator -> datum.staked_amount >= min_curator_stake
@@ -261,19 +254,31 @@ fn check_minimum_stake(datum: StakeDatum) -> Bool {
   }
 }
 
+/// Main validator logic for the staking contract.
+/// Parameters are embedded into the script at compile/blueprint application time.
 validator staking_contract(
+  /// Policy ID of the FAIRWAY token used for staking.
   fairway_token_policy: PolicyId,
+  /// Policy ID of the DID token required as a reference input.
   did_token_policy: PolicyId,
+  /// Verification key hash of the authority allowed to slash stakes.
   slashing_authority: ByteArray,
 ) {
+  /// Spend handler: Controls how UTxOs locked by this validator can be spent.
   spend(
+    /// The datum attached to the UTxO being spent (passed as Option).
     datum_opt: Option<StakeDatum>,
+    /// The action (Stake, Withdraw, Slash) being attempted.
     redeemer: StakeAction,
+    /// The specific UTxO being spent (OutputReference). Ignored here as info is in context.
     _target: OutputReference,
+    /// The full transaction context provided by the ledger.
     context: ScriptContext,
   ) {
+    // Ensure the datum is present, otherwise fail.
     expect Some(datum) = datum_opt
 
+    // Dispatch to the appropriate handler based on the redeemer action.
     when redeemer is {
       Stake ->
         handle_stake(fairway_token_policy, did_token_policy, datum, context)
@@ -283,35 +288,8 @@ validator staking_contract(
     }
   }
 
+  // Fallback handler to reject any script purpose other than 'spend'.
   else(_) {
-    fail
+    fail @"Unsupported script purpose"
   }
-
-  // --- Moved Action Handlers --- 
-  // --- Moved Helper Functions --- 
 }
-// Closing brace for validator block
-
-// --- Action Handlers (commented out) ---
-// 
-// fun handle_stake(datum: StakeDatum, context: ScriptContext) -> Bool {
-//    ...
-// }
-// ...
-// 
-
-// --- Action Handlers ---
-
-// [This section is now empty as functions were moved]
-
-// --- Helper Functions (commented out) ---
-// 
-// fun find_own_input(tx: Transaction, purpose: ScriptContext) -> Option<Input> {
-//    ...
-// }
-// ...
-// 
-
-// --- Helper Functions ---
-
-// [This section is now empty as functions were moved] 
