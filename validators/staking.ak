@@ -99,7 +99,8 @@ fn handle_withdraw(
 /// Validates the conditions for the slashing authority to slash the stake.
 fn handle_slash(
   fairway_token_policy: PolicyId,
-  slashing_authority: ByteArray, // Passed as parameter
+  slashing_authority: ByteArray,
+  // Passed as parameter
   datum: StakeDatum,
   context: ScriptContext,
 ) -> Bool {
